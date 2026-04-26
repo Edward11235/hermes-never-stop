@@ -1,0 +1,14 @@
+# Logs
+watchdog.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Config (users should edit their own)
+# config.ini  # Keep this so users have a template
+
+# IDE
+.vscode/
+.idea/
