@@ -68,9 +68,12 @@ class Watchdog:
         self.message = config["message"]
         self.api_url = config["api_url"]
         
+        # Use Hermes's state.db as activity indicator (gets updated on each message)
+        self.state_db = Path.home() / ".hermes" / "state.db"
         self.marker_file = Path.home() / ".hermes" / "activity_marker"
         self.marker_file.parent.mkdir(parents=True, exist_ok=True)
         
+        # Create marker file for backwards compatibility
         if not self.marker_file.exists():
             self.marker_file.touch()
         
@@ -99,6 +102,98 @@ class Watchdog:
                 f.write(line + "\n")
         except Exception:
             pass
+    
+    def _is_hermes_active(self) -> tuple[bool, str]:
+        """Check if Hermes process is actively running.
+        
+        Returns (is_active, reason) tuple.
+        
+        To be considered "active", Hermes must have BOTH:
+        1. CPU activity (process is doing work)
+        2. Marker file updates (Hermes is making progress)
+        
+        If CPU is active but marker file is stale, Hermes is likely stuck
+        on an error or waiting for input.
+        """
+        try:
+            # Find Hermes process
+            result = subprocess.run(
+                ["pgrep", "-f", "hermes"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode != 0:
+                return False, "no process"
+            
+            pids = [p for p in result.stdout.strip().split("\n") if p]
+            if not pids:
+                return False, "no process"
+            
+            # Check if any Hermes process has recent CPU activity
+            cpu_active = False
+            for pid in pids[:3]:
+                try:
+                    # Read /proc/[pid]/stat to get CPU times
+                    stat_file = f"/proc/{pid}/stat"
+                    if os.path.exists(stat_file):
+                        with open(stat_file, 'r') as f:
+                            stat_data = f.read()
+                        
+                        # Parse utime and stime (fields 14 and 15 after the comm field)
+                        # Format: pid (comm) state ppid ... utime stime ...
+                        parts = stat_data.split()
+                        if len(parts) >= 17:
+                            # Store current CPU time for comparison
+                            utime = int(parts[13])
+                            stime = int(parts[14])
+                            total_time = utime + stime
+                            
+                            # Check if we have a previous reading
+                            cache_file = self.marker_file.parent / f"cpu_time_{pid}"
+                            if cache_file.exists():
+                                try:
+                                    with open(cache_file, 'r') as f:
+                                        prev_time = int(f.read().strip())
+                                    
+                                    # If CPU time increased, process is using CPU
+                                    if total_time > prev_time:
+                                        cpu_active = True
+                                        # Update cache
+                                        with open(cache_file, 'w') as f:
+                                            f.write(str(total_time))
+                                        break  # Found active CPU
+                                except (ValueError, IOError):
+                                    pass
+                            
+                            # Store current CPU time
+                            with open(cache_file, 'w') as f:
+                                f.write(str(total_time))
+                except (OSError, IOError, ProcessLookupError):
+                    pass
+            
+            if not cpu_active:
+                return False, "no CPU activity"
+            
+            # CPU is active - now check if Hermes is making progress
+            # Use state.db mtime as the real activity indicator
+            # (Hermes updates this on each message processed)
+            if self.state_db.exists():
+                state_age = time.time() - self.state_db.stat().st_mtime
+                if state_age < self.timeout:
+                    # state.db is recent - Hermes is making progress
+                    return True, "CPU + state.db"
+                else:
+                    # CPU active but state.db stale - Hermes is stuck!
+                    return False, f"stuck (state.db {int(state_age)}s old)"
+            else:
+                # No state.db - fall back to marker file
+                marker_age = time.time() - self.marker_file.stat().st_mtime
+                if marker_age < self.timeout:
+                    return True, "CPU + marker"
+                else:
+                    return False, f"stuck (marker {int(marker_age)}s old)"
+                
+        except Exception as e:
+            return False, f"error: {e}"
     
     def get_last_update(self) -> datetime:
         """Get last modification time of marker file."""
@@ -309,14 +404,23 @@ class Watchdog:
         self.log("=" * 50)
         
         while self.running:
+            # First check if Hermes is actively working (CPU activity + marker updates)
+            hermes_active, active_reason = self._is_hermes_active()
+            
             last_update = self.get_last_update()
             age = datetime.now() - last_update
             age_seconds = int(age.total_seconds())
             
-            status = "ACTIVE" if age_seconds < self.timeout else "STALLED"
-            self.log(f"Last update: {age_seconds}s ago [{status}]")
-            
-            if age_seconds >= self.timeout:
+            if hermes_active:
+                status = f"ACTIVE ({active_reason})"
+                # Don't send message - Hermes is working
+                self.log(f"Hermes is active [{status}]")
+            elif age_seconds < self.timeout:
+                status = "ACTIVE"
+                self.log(f"Last update: {age_seconds}s ago [{status}]")
+            else:
+                status = "STALLED"
+                self.log(f"Last update: {age_seconds}s ago [{status}] ({active_reason})")
                 self.send_continue()
             
             time.sleep(self.interval)
