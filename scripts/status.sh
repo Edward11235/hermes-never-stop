@@ -2,6 +2,7 @@
 # Check Hermes Always On watchdog status
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 echo "=== Hermes Always On Status ==="
 
@@ -13,7 +14,7 @@ if pgrep -f "watchdog.py" > /dev/null; then
     # Show last 5 log lines
     echo ""
     echo "Recent activity:"
-    tail -5 "$SCRIPT_DIR/watchdog.log" 2>/dev/null || echo "No logs yet"
+    tail -5 "$PROJECT_DIR/watchdog.log" 2>/dev/null || echo "No logs yet"
     
     # Show Hermes terminal
     HERMES_PID=$(pgrep -f "hermes" | head -1)
@@ -25,5 +26,5 @@ if pgrep -f "watchdog.py" > /dev/null; then
 else
     echo "Status: NOT RUNNING"
     echo ""
-    echo "To start: ./start.sh"
+    echo "To start: ./scripts/start.sh"
 fi
