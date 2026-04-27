@@ -1,4 +1,4 @@
-# Hermes Always On
+# Hermes Never Stop
 
 A watchdog that keeps Hermes AI agent running by detecting when it stops responding.
 
